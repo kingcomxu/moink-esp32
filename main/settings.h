@@ -1,0 +1,148 @@
+#ifndef MOINK_SETTINGS_H
+#define MOINK_SETTINGS_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include "esp_err.h"
+
+/*
+ * 持久化设置（NVS 命名空间 "moink"）。页面所有画面参数（风格 / 强度 / 文字 /
+ * 旋转…）都留在手机 localStorage，固件只存会影响「传输与电源」的这几项。
+ *
+ * ★ R1.2.2：升级**不再强制重置设置** —— 只清理本版已废弃的键
+ * （settings_reset_for_upgrade()），屏型 / 功率 / GPIO 接法 / 休眠 / 唤醒 /
+ * 热点凭据全部原样保留。读取时仍不做「历史值归一」，越界值一律回落默认档。
+ *
+ * ★ R1.2.2：引脚（SPI 六线 + 电池 ADC + 唤醒键）改为运行时可配，随 NVS 持久化；
+ *   另有固定自锁脚 GPIO2（MOS 一键开机），不对外开放。
+ */
+
+#define SETT_SSID_MAX 33
+#define SETT_PASS_MAX 65
+
+/* 休眠时长档位（秒）。0 = 不休眠。 */
+#define SETT_SLEEP_OFF    0
+#define SETT_SLEEP_1MIN   60
+#define SETT_SLEEP_3MIN   180
+#define SETT_SLEEP_5MIN   300
+
+/* 定时自动唤醒档位（秒）。0 = 关闭。 */
+#define SETT_WAKE_OFF     0
+#define SETT_WAKE_1H      3600
+#define SETT_WAKE_12H     43200
+#define SETT_WAKE_1D      86400
+
+/* 超时动作（R1.3.3）：空闲达到「超时」时长后执行什么。 */
+#define SETT_ACTION_SLEEP 0   /* 进入深睡（可配自动唤醒） */
+#define SETT_ACTION_OFF   1   /* 释放自锁断电（需硬件自锁电路，见 PIN_SELF_LOCK） */
+
+/* WiFi 发射功率档位。高 = 18dBm；中 = 10dBm；低 = 8.5dBm（R1.3.3 起为默认档）。 */
+#define SETT_WIFI_PWR_HIGH  0
+#define SETT_WIFI_PWR_MID   1
+#define SETT_WIFI_PWR_LOW   2
+
+/* ---------------- 引脚配置（经典 ESP32） ----------------
+ *
+ * 经典 ESP32 的可用 GPIO 不连续：GPIO6..11 接片内 SPI flash，GPIO20、24、
+ * 28..31 不存在；GPIO34..39 只能输入。GPIO2 固定给自锁电路。
+ * GPIO0、5、12、15 是启动绑带脚，只有接线不会破坏复位采样电平时才可用。
+ * 电池 ADC 仅允许 ADC1 GPIO32..39，避免 ADC2 与 WiFi 冲突。
+ * 深睡唤醒仅允许带 RTC 功能且支持内部上拉的 GPIO4、13、14、25..27、32、33；
+ * GPIO0、12、15 等启动绑带脚不作为唤醒键，以免影响复位启动模式。
+ */
+
+/* 8 个功能的引脚索引；该顺序同时也是页面「自定义」菜单的排列顺序。 */
+enum {
+    PIN_IDX_ADC  = 0,   /* 电池 ADC   ：仅 ADC1 GPIO32..39 */
+    PIN_IDX_WAKE,       /* 深睡唤醒键 ：仅安全的 RTC GPIO */
+    PIN_IDX_SCK,
+    PIN_IDX_MOSI,
+    PIN_IDX_CS,
+    PIN_IDX_DC,
+    PIN_IDX_RST,
+    PIN_IDX_BUSY,
+    PIN_IDX_COUNT
+};
+
+/*
+ * MOS 自锁一键开机脚：固件固定 GPIO2，上电第一件事就拉高并保持，
+ * 深睡前锁存电平防止掉电。不对外开放配置（自定义菜单里也会排除它）。
+ */
+#define PIN_SELF_LOCK  2
+
+/* GPIO 预设（与页面下拉一一对应；取值即 gpio_preset）。 */
+#define GPIO_PRESET_DEFAULT  0   /* 默认：现役接法 */
+#define GPIO_PRESET_LINE     1   /* 排线 */
+#define GPIO_PRESET_BOARD    2   /* 整合板 */
+#define GPIO_PRESET_CUSTOM   3   /* 自定义 */
+#define GPIO_PRESET_COUNT    4
+#define GPIO_PRESET_NPRESET  3   /* 前 3 档为固定预设，第 4 档为用户自填 */
+
+typedef struct { uint8_t v[PIN_IDX_COUNT]; } pin_cfg_t;
+
+/* 固定预设表：[0] 默认 / [1] 排线 / [2] 整合板。 */
+extern const pin_cfg_t PIN_PRESETS[GPIO_PRESET_NPRESET];
+
+/* 可用作 GPIO 输出的引脚（排除 SPI flash、无效脚、自锁脚及输入专用脚）。 */
+bool pin_io_allowed(uint8_t io);
+/* ADC 脚合法集合：ADC1 GPIO32..39。 */
+bool pin_adc_allowed(uint8_t io);
+/* 唤醒脚合法集合：支持低电平深睡唤醒和内部上拉的非绑带 RTC GPIO。 */
+bool pin_wake_allowed(uint8_t io);
+/* 整表校验：每脚在各自合法域内、彼此不重复、避开自锁脚。合法返回 true。 */
+bool pin_cfg_valid(const pin_cfg_t *c);
+/* 取当前生效引脚表（永不为 NULL）。 */
+const pin_cfg_t *settings_pins(void);
+
+typedef struct {
+    uint8_t  panel;      /* EPD_PANEL_A0 / EPD_PANEL_A1 */
+    uint8_t  hflip;      /* 保留字段：800x600 对照档已删除，当前无生效档位 */
+    uint8_t  wifi_pwr;   /* SETT_WIFI_PWR_HIGH / MID / LOW */
+    uint8_t  gpio_preset;/* GPIO_PRESET_DEFAULT / LINE / BOARD / CUSTOM */
+    pin_cfg_t pins;      /* 生效引脚表（CUSTOM 时即用户所填，否则等于对应预设） */
+    uint32_t sleep_s;    /* 空闲超时时长；0 = 不超时（既不睡也不关） */
+    uint8_t  timeout_action; /* SETT_ACTION_SLEEP / SETT_ACTION_OFF（R1.3.3） */
+    uint32_t wake_s;     /* 定时自动唤醒间隔；0 = 关闭 */
+    uint8_t  wake_show;  /* 定时唤醒后自动切到下一张；1 = 是（默认，R1.3.3） */
+    char     ap_ssid[SETT_SSID_MAX];  /* 空 = 用默认 MoInk-XXXX */
+    char     ap_pass[SETT_PASS_MAX];  /* 空 = 热点开放 */
+} moink_settings_t;
+
+void settings_init(void);
+const moink_settings_t *settings_get(void);
+
+/* 各 setter 立即写 NVS；失败仅告警不影响 RAM 态。 */
+esp_err_t settings_set_panel(uint8_t v);
+esp_err_t settings_set_hflip(uint8_t v);
+esp_err_t settings_set_wifi_pwr(uint8_t v);
+esp_err_t settings_set_sleep(uint32_t v);
+esp_err_t settings_set_wake(uint32_t v);
+/* R1.3.3：空闲超时后的动作（休眠 / 关机断电）。 */
+esp_err_t settings_set_timeout_action(uint8_t v);
+/* R1.3.3：定时唤醒后是否自动切图（默认 1）。 */
+esp_err_t settings_set_wake_show(uint8_t v);
+/*
+ * 设置引脚。preset 取 GPIO_PRESET_*：
+ *   0/1/2 从固定预设表取（custom 被忽略）；
+ *   3     使用 custom，必须通过 pin_cfg_valid()，否则返回 ESP_ERR_INVALID_ARG。
+ * 引脚改动需重启才生效（SPI 总线在启动时按引脚初始化），调用方负责提示。
+ */
+esp_err_t settings_set_gpio(uint8_t preset, const pin_cfg_t *custom);
+/* FB-014①：ssid / pass 任一为 NULL = 保持当前值；pass 为空串 = 清除密码（热点开放）。 */
+esp_err_t settings_set_ap(const char *ssid, const char *pass);
+
+/* 恢复出厂：擦除整个 NVS 命名空间（含热点凭据与页面热更标记）；调用方负责重启。 */
+void settings_factory_reset(void);
+
+/*
+ * 固件升级收尾：**只清理已废弃的键**，不再重置用户设置（R1.2.2）。
+ *   - 清理：a1_mode（A1 档位已删除）、a11_var（A1.1 诊断变体已删除）等旧版遗留键。
+ *   - 保留：panel / hflip / wifi_pwr / gpio_preset + 8 个引脚键 / sleep_s / wake_s /
+ *     ap_ssid / ap_pass —— 它们描述硬件与用户偏好，重置会把人挡在门外。
+ *   - 页面热更标记（web_len / web_crc / page_ver）由 ota_web_clear() 负责清除。
+ * 调用方在固件校验通过、确定要切槽重启之后调用。
+ */
+void settings_reset_for_upgrade(void);
+
+#endif /* MOINK_SETTINGS_H */
